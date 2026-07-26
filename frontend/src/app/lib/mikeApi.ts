@@ -4,6 +4,8 @@
  */
 
 import { supabase } from "@/app/lib/supabase";
+import { isRegulatedMode } from "@/app/lib/regulatedMode";
+import { getCognitoIdToken } from "@/app/lib/cognitoAuth";
 import type {
     AssistantEvent,
     Chat,
@@ -38,8 +40,10 @@ interface ServerChatDetailOut {
     messages: ServerMessage[];
 }
 
-const API_BASE =
-    process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:3001";
+// In regulated/Tailscale deploys, prefer same-origin proxy (/mike-api → backend).
+const API_BASE = isRegulatedMode()
+    ? process.env.NEXT_PUBLIC_API_BASE_URL || "/mike-api"
+    : process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:3001";
 const isDev = process.env.NODE_ENV !== "production";
 const devLog = (...args: Parameters<typeof console.log>) => {
     if (isDev) console.log(...args);
@@ -66,6 +70,11 @@ export function isMfaRequiredError(error: unknown) {
 }
 
 async function getAuthHeader(): Promise<Record<string, string>> {
+    if (isRegulatedMode()) {
+        const token = await getCognitoIdToken();
+        if (!token) return {};
+        return { Authorization: `Bearer ${token}` };
+    }
     const {
         data: { session },
     } = await supabase.auth.getSession();

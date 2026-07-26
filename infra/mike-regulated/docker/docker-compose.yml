@@ -43,7 +43,7 @@ services:
       context: ../../../frontend
       dockerfile: ../infra/mike-regulated/docker/Dockerfile.frontend
       args:
-        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://127.0.0.1:3001}
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-/mike-api}
         NEXT_PUBLIC_COGNITO_USER_POOL_ID: ${COGNITO_USER_POOL_ID}
         NEXT_PUBLIC_COGNITO_CLIENT_ID: ${COGNITO_CLIENT_ID}
         NEXT_PUBLIC_COGNITO_REGION: ${COGNITO_REGION:-us-east-1}

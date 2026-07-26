@@ -10,6 +10,12 @@ import { SiteLogo } from "@/app/components/site-logo";
 import { CheckCircle2 } from "lucide-react";
 import { useAuth } from "@/app/contexts/AuthContext";
 import { updateUserProfile } from "@/app/lib/mikeApi";
+import { isRegulatedMode } from "@/app/lib/regulatedMode";
+import {
+    cognitoConfirmSignUp,
+    cognitoSignIn,
+    cognitoSignUp,
+} from "@/app/lib/cognitoAuth";
 
 const authGlassCardClassName =
     "rounded-2xl border border-white/70 bg-white/72 p-8 shadow-[0_4px_14px_rgba(15,23,42,0.045),inset_0_1px_0_rgba(255,255,255,0.86),inset_0_-8px_18px_rgba(255,255,255,0.12)] backdrop-blur-2xl";
@@ -24,70 +30,91 @@ const authToggleInactiveClassName =
 
 export default function SignupPage() {
     const router = useRouter();
-    const { isAuthenticated, authLoading } = useAuth();
+    const { isAuthenticated, authLoading, refreshAuth } = useAuth();
     const [email, setEmail] = useState("");
     const [password, setPassword] = useState("");
     const [confirmPassword, setConfirmPassword] = useState("");
     const [name, setName] = useState("");
     const [organisation, setOrganisation] = useState("");
+    const [confirmCode, setConfirmCode] = useState("");
+    const [needsConfirm, setNeedsConfirm] = useState(false);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [success, setSuccess] = useState(false);
+    const regulated = isRegulatedMode();
 
     useEffect(() => {
-        if (!authLoading && isAuthenticated && !success) {
+        if (!authLoading && isAuthenticated && !success && !needsConfirm) {
             router.replace("/assistant");
         }
-    }, [authLoading, isAuthenticated, router, success]);
+    }, [authLoading, isAuthenticated, router, success, needsConfirm]);
+
+    const finishProfile = async () => {
+        const trimmedName = name.trim();
+        const trimmedOrg = organisation.trim();
+        if (!trimmedName && !trimmedOrg) return;
+        try {
+            await updateUserProfile({
+                ...(trimmedName && { displayName: trimmedName }),
+                ...(trimmedOrg && { organisation: trimmedOrg }),
+            });
+        } catch (profileError) {
+            console.error("[signup] failed to persist profile fields", profileError);
+        }
+    };
 
     const handleSignup = async (e: React.FormEvent) => {
         e.preventDefault();
         setLoading(true);
         setError(null);
 
-        // Validate passwords match
         if (password !== confirmPassword) {
             setError("Passwords do not match");
             setLoading(false);
             return;
         }
 
-        // Validate password length
-        if (password.length < 6) {
-            setError("Password must be at least 6 characters");
+        const minLen = regulated ? 14 : 6;
+        if (password.length < minLen) {
+            setError(
+                regulated
+                    ? "Password must be at least 14 characters with upper, lower, number, and symbol"
+                    : "Password must be at least 6 characters",
+            );
             setLoading(false);
             return;
         }
 
         try {
-            const { data, error } = await supabase.auth.signUp({
-                email,
-                password,
-            });
-
-            if (error) throw error;
-
-            if (data.session) {
-                const trimmedName = name.trim();
-                const trimmedOrg = organisation.trim();
-                if (trimmedName || trimmedOrg) {
-                    try {
-                        await updateUserProfile({
-                            ...(trimmedName && { displayName: trimmedName }),
-                            ...(trimmedOrg && { organisation: trimmedOrg }),
-                        });
-                    } catch (profileError) {
-                        console.error(
-                            "[signup] failed to persist profile fields",
-                            profileError,
-                        );
-                    }
+            if (regulated) {
+                const emailNorm = email.trim().toLowerCase();
+                const result = await cognitoSignUp({
+                    email: emailNorm,
+                    password,
+                    name: name.trim() || undefined,
+                });
+                if (!result.userConfirmed) {
+                    setNeedsConfirm(true);
+                    setLoading(false);
+                    return;
                 }
+                await cognitoSignIn(emailNorm, password);
+                await refreshAuth();
+                await finishProfile();
+                setSuccess(true);
+                setTimeout(() => router.push("/assistant"), 1500);
+            } else {
+                const { data, error } = await supabase.auth.signUp({
+                    email,
+                    password,
+                });
+                if (error) throw error;
+                if (data.session) {
+                    await finishProfile();
+                }
+                setSuccess(true);
+                setTimeout(() => router.push("/assistant"), 2000);
             }
-            setSuccess(true);
-            setTimeout(() => {
-                router.push("/assistant");
-            }, 2000);
         } catch (error: unknown) {
             setError(
                 error instanceof Error
@@ -99,7 +126,29 @@ export default function SignupPage() {
         }
     };
 
-    // Success View
+    const handleConfirm = async (e: React.FormEvent) => {
+        e.preventDefault();
+        setLoading(true);
+        setError(null);
+        try {
+            const emailNorm = email.trim().toLowerCase();
+            await cognitoConfirmSignUp(emailNorm, confirmCode.trim());
+            await cognitoSignIn(emailNorm, password);
+            await refreshAuth();
+            await finishProfile();
+            setSuccess(true);
+            setTimeout(() => router.push("/assistant"), 1500);
+        } catch (error: unknown) {
+            setError(
+                error instanceof Error
+                    ? error.message
+                    : "Invalid confirmation code",
+            );
+        } finally {
+            setLoading(false);
+        }
+    };
+
     if (success) {
         return (
             <div className="min-h-dvh bg-gray-50/80 flex items-start justify-center px-6 pt-32 md:pt-40 pb-10 relative">
@@ -107,9 +156,7 @@ export default function SignupPage() {
                     <SiteLogo size="lg" asLink />
                 </div>
                 <div className="w-full max-w-md">
-                    <div
-                        className={`${authGlassCardClassName} p-10 text-center`}
-                    >
+                    <div className={`${authGlassCardClassName} p-10 text-center`}>
                         <div className="mx-auto w-12 h-12 bg-green-50 rounded-full flex items-center justify-center mb-6">
                             <CheckCircle2 className="h-6 w-6 text-green-600" />
                         </div>
@@ -125,7 +172,50 @@ export default function SignupPage() {
         );
     }
 
-    // Default Signup Form View
+    if (needsConfirm) {
+        return (
+            <div className="min-h-dvh bg-gray-50/80 flex items-start justify-center px-6 pt-32 md:pt-40 pb-10 relative">
+                <div className="absolute top-4 md:top-8 left-1/2 -translate-x-1/2">
+                    <SiteLogo size="lg" asLink />
+                </div>
+                <div className="w-full max-w-md">
+                    <div className={`${authGlassCardClassName} mb-4`}>
+                        <h2 className="text-2xl font-medium font-serif text-gray-950 mb-2">
+                            Confirm email
+                        </h2>
+                        <p className="text-sm text-gray-600 mb-6">
+                            Enter the verification code sent to{" "}
+                            <strong>{email}</strong>.
+                        </p>
+                        <form onSubmit={handleConfirm} className="space-y-4">
+                            <Input
+                                type="text"
+                                inputMode="numeric"
+                                value={confirmCode}
+                                onChange={(e) => setConfirmCode(e.target.value)}
+                                placeholder="6-digit code"
+                                required
+                                className={`w-full ${authInputClassName}`}
+                            />
+                            {error && (
+                                <div className="text-red-600 text-sm bg-red-50 p-3 rounded">
+                                    {error}
+                                </div>
+                            )}
+                            <Button
+                                type="submit"
+                                disabled={loading}
+                                className="w-full bg-black hover:bg-gray-900 text-white"
+                            >
+                                {loading ? "Confirming..." : "Confirm and continue"}
+                            </Button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        );
+    }
+
     return (
         <div className="min-h-dvh bg-gray-50/80 flex items-start justify-center px-6 pt-32 md:pt-40 pb-10 relative">
             <div className="absolute top-4 md:top-8 left-1/2 -translate-x-1/2">
@@ -149,6 +239,13 @@ export default function SignupPage() {
                             </span>
                         </div>
                     </div>
+
+                    {regulated && (
+                        <p className="mb-4 text-xs text-gray-500">
+                            Regulated workspace. Password: 14+ characters with
+                            upper, lower, number, and symbol.
+                        </p>
+                    )}
 
                     <form onSubmit={handleSignup} className="space-y-4">
                         <div>
@@ -223,7 +320,11 @@ export default function SignupPage() {
                                 type="password"
                                 value={password}
                                 onChange={(e) => setPassword(e.target.value)}
-                                placeholder="Create a password (min. 6 characters)"
+                                placeholder={
+                                    regulated
+                                        ? "Min. 14 chars, mixed case, number, symbol"
+                                        : "Create a password (min. 6 characters)"
+                                }
                                 required
                                 className={`w-full ${authInputClassName}`}
                             />
@@ -263,28 +364,6 @@ export default function SignupPage() {
                             {loading ? "Creating account..." : "Sign up"}
                         </Button>
                     </form>
-
-                    {/* Terms and Privacy */}
-                    <div className="mt-4 text-center text-xs text-gray-500">
-                        By signing up, you agree to our{" "}
-                        <Link
-                            href="https://mikeoss.com/terms"
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-blue-600 hover:underline"
-                        >
-                            Terms of Use
-                        </Link>{" "}
-                        and{" "}
-                        <Link
-                            href="https://mikeoss.com/privacy"
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-blue-600 hover:underline"
-                        >
-                            Privacy Policy
-                        </Link>
-                    </div>
                 </div>
             </div>
         </div>

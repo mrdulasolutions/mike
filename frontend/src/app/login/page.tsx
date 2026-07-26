@@ -8,6 +8,8 @@ import { Input } from "@/app/components/ui/input";
 import Link from "next/link";
 import { SiteLogo } from "@/app/components/site-logo";
 import { useAuth } from "@/app/contexts/AuthContext";
+import { isRegulatedMode } from "@/app/lib/regulatedMode";
+import { cognitoSignIn } from "@/app/lib/cognitoAuth";
 
 const authGlassCardClassName =
     "rounded-2xl border border-white/70 bg-white/72 p-8 shadow-[0_4px_14px_rgba(15,23,42,0.045),inset_0_1px_0_rgba(255,255,255,0.86),inset_0_-8px_18px_rgba(255,255,255,0.12)] backdrop-blur-2xl";
@@ -22,11 +24,12 @@ const authToggleInactiveClassName =
 
 export default function LoginPage() {
     const router = useRouter();
-    const { isAuthenticated, authLoading } = useAuth();
+    const { isAuthenticated, authLoading, refreshAuth } = useAuth();
     const [email, setEmail] = useState("");
     const [password, setPassword] = useState("");
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const regulated = isRegulatedMode();
 
     useEffect(() => {
         if (!authLoading && isAuthenticated) {
@@ -40,20 +43,23 @@ export default function LoginPage() {
         setError(null);
 
         try {
-            const { error } = await supabase.auth.signInWithPassword({
-                email,
-                password,
-            });
-
-            if (error) throw error;
-
+            if (regulated) {
+                await cognitoSignIn(email.trim().toLowerCase(), password);
+                await refreshAuth();
+            } else {
+                const { error } = await supabase.auth.signInWithPassword({
+                    email,
+                    password,
+                });
+                if (error) throw error;
+            }
             router.push("/assistant");
         } catch (error: unknown) {
-            setError(
+            const message =
                 error instanceof Error
                     ? error.message
-                    : "An error occurred during login",
-            );
+                    : "An error occurred during login";
+            setError(message);
         } finally {
             setLoading(false);
         }
@@ -65,7 +71,6 @@ export default function LoginPage() {
                 <SiteLogo size="lg" asLink />
             </div>
             <div className="w-full max-w-md">
-                {/* Login Form */}
                 <div className={`${authGlassCardClassName} mb-4`}>
                     <div className="flex justify-between items-center mb-6">
                         <h2 className="text-left text-2xl font-medium font-serif text-gray-950">
@@ -83,6 +88,12 @@ export default function LoginPage() {
                             </Link>
                         </div>
                     </div>
+                    {regulated && (
+                        <p className="mb-4 text-xs text-gray-500">
+                            Regulated workspace — Cognito sign-in (password min
+                            14 chars, mixed case, number, symbol).
+                        </p>
+                    )}
                     <form onSubmit={handleLogin} className="space-y-4">
                         <div>
                             <label

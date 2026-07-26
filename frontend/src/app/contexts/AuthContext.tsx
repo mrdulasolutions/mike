@@ -9,6 +9,13 @@ import React, {
 } from "react";
 import type { User as SupabaseUser } from "@supabase/supabase-js";
 import { supabase } from "@/app/lib/supabase";
+import { isRegulatedMode } from "@/app/lib/regulatedMode";
+import {
+    cognitoSignOut,
+    getCognitoIdToken,
+    getCognitoUserFromStorage,
+    readStoredSession,
+} from "@/app/lib/cognitoAuth";
 
 interface User {
     id: string;
@@ -22,6 +29,8 @@ interface AuthContextType {
     authLoading: boolean;
     signOut: () => Promise<void>;
     updateEmail: (email: string) => Promise<User>;
+    /** Call after Cognito login/signup to refresh context */
+    refreshAuth: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -37,20 +46,49 @@ function toUser(user: SupabaseUser): User {
 export function AuthProvider({ children }: { children: ReactNode }) {
     const [user, setUser] = useState<User | null>(null);
     const [authLoading, setAuthLoading] = useState(true);
+    const regulated = isRegulatedMode();
+
+    const refreshAuth = async () => {
+        if (regulated) {
+            const token = await getCognitoIdToken();
+            const stored = getCognitoUserFromStorage();
+            if (token && stored) {
+                setUser({ id: stored.id, email: stored.email });
+            } else if (readStoredSession() && !token) {
+                setUser(null);
+            } else if (stored) {
+                setUser({ id: stored.id, email: stored.email });
+            } else {
+                setUser(null);
+            }
+            return;
+        }
+
+        const {
+            data: { session },
+        } = await supabase.auth.getSession();
+        if (session?.user) {
+            setUser(toUser(session.user));
+        } else {
+            setUser(null);
+        }
+    };
 
     useEffect(() => {
-        const checkUser = async () => {
-            const {
-                data: { session },
-            } = await supabase.auth.getSession();
+        let cancelled = false;
 
-            if (session?.user) {
-                setUser(toUser(session.user));
-            }
-            setAuthLoading(false);
+        const checkUser = async () => {
+            await refreshAuth();
+            if (!cancelled) setAuthLoading(false);
         };
 
         checkUser();
+
+        if (regulated) {
+            return () => {
+                cancelled = true;
+            };
+        }
 
         const {
             data: { subscription },
@@ -64,16 +102,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         });
 
         return () => {
+            cancelled = true;
             subscription.unsubscribe();
         };
-    }, []);
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- mount once
+    }, [regulated]);
 
     const signOut = async () => {
+        if (regulated) {
+            cognitoSignOut();
+            setUser(null);
+            return;
+        }
         await supabase.auth.signOut({ scope: "local" });
         setUser(null);
     };
 
     const updateEmail = async (email: string) => {
+        if (regulated) {
+            throw new Error(
+                "Change email in your identity provider (Cognito) for regulated accounts.",
+            );
+        }
         const redirectTo =
             typeof window === "undefined"
                 ? undefined
@@ -99,6 +149,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                 authLoading,
                 signOut,
                 updateEmail,
+                refreshAuth,
             }}
         >
             {children}
