@@ -1,6 +1,12 @@
 import { Request, Response, NextFunction } from "express";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { syncProfileEmail } from "../lib/userLookup";
+import { verifyCognitoToken } from "../lib/cognitoAuth";
+import {
+  cognitoConfigured,
+  isRegulatedMode,
+} from "../lib/regulated";
+import { ensureRegulatedUser } from "../lib/regulatedUser";
 
 const isDev = process.env.NODE_ENV !== "production";
 const devLog = (...args: Parameters<typeof console.log>) => {
@@ -99,6 +105,28 @@ export async function requireAuth(
   }
   const token = auth.slice(7).trim();
 
+  // Regulated AWS path: Cognito JWT (MFA enforced by user pool).
+  if (isRegulatedMode() && cognitoConfigured()) {
+    try {
+      const user = await verifyCognitoToken(token);
+      await ensureRegulatedUser(user.id, user.email);
+      res.locals.userId = user.id;
+      res.locals.userEmail = user.email;
+      res.locals.token = token;
+      res.locals.authProvider = "cognito";
+      next();
+      return;
+    } catch (error) {
+      devLog("[auth/cognito] verification failed", {
+        method: req.method,
+        path: req.originalUrl,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      res.status(401).json({ detail: "Invalid or expired token" });
+      return;
+    }
+  }
+
   const supabaseUrl = process.env.SUPABASE_URL ?? "";
   const serviceKey = process.env.SUPABASE_SECRET_KEY ?? "";
 
@@ -119,6 +147,7 @@ export async function requireAuth(
   res.locals.userId = data.user.id;
   res.locals.userEmail = data.user.email?.toLowerCase() ?? "";
   res.locals.token = token;
+  res.locals.authProvider = "supabase";
   const syncError = await syncProfileEmail(
     admin,
     data.user.id,
@@ -143,6 +172,12 @@ export async function requireMfaIfEnrolled(
   res: Response,
   next: NextFunction,
 ): Promise<void> {
+  // Cognito user-pool MFA is enforced at token issue time in regulated mode.
+  if (isRegulatedMode() && res.locals.authProvider === "cognito") {
+    next();
+    return;
+  }
+
   const token = typeof res.locals.token === "string" ? res.locals.token : "";
   if (!token) {
     devLog("[auth/mfa] missing auth session", {

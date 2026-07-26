@@ -1,0 +1,58 @@
+# Mike regulated stack — runs on the mike-regulated EC2 host.
+# Postgres is already running as container `mike-postgres` on the host network.
+# This compose adds PostgREST gateway + API + web.
+
+services:
+  postgrest:
+    image: postgrest/postgrest:v12.2.8
+    container_name: mike-postgrest
+    restart: unless-stopped
+    environment:
+      PGRST_DB_URI: ${PGRST_DB_URI}
+      PGRST_DB_SCHEMAS: public,auth
+      PGRST_DB_ANON_ROLE: ${PGRST_DB_ROLE:-mikeadmin}
+      PGRST_DB_EXTRA_SEARCH_PATH: public
+      PGRST_JWT_SECRET: ${PGRST_JWT_SECRET}
+      PGRST_SERVER_PORT: 3002
+    network_mode: host
+
+  rest-gateway:
+    image: caddy:2.8-alpine
+    container_name: mike-rest-gateway
+    restart: unless-stopped
+    depends_on:
+      - postgrest
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    network_mode: host
+
+  backend:
+    build:
+      context: ../../../backend
+      dockerfile: ../infra/mike-regulated/docker/Dockerfile.backend
+    container_name: mike-backend
+    restart: unless-stopped
+    env_file:
+      - /opt/mike-regulated/app.env
+    network_mode: host
+    depends_on:
+      - rest-gateway
+
+  frontend:
+    build:
+      context: ../../../frontend
+      dockerfile: ../infra/mike-regulated/docker/Dockerfile.frontend
+      args:
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://127.0.0.1:3001}
+        NEXT_PUBLIC_COGNITO_USER_POOL_ID: ${COGNITO_USER_POOL_ID}
+        NEXT_PUBLIC_COGNITO_CLIENT_ID: ${COGNITO_CLIENT_ID}
+        NEXT_PUBLIC_COGNITO_REGION: ${COGNITO_REGION:-us-east-1}
+        NEXT_PUBLIC_REGULATED_MODE: "true"
+    container_name: mike-frontend
+    restart: unless-stopped
+    environment:
+      PORT: "3000"
+      HOSTNAME: "0.0.0.0"
+    network_mode: host
+    depends_on:
+      - backend
