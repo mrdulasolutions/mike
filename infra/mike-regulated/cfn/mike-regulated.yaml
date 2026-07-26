@@ -624,36 +624,54 @@ Resources:
         HttpPutResponseHopLimit: 2
         InstanceMetadataTags: enabled
       UserData:
-        Fn::Base64:
-          Fn::Sub:
-            - |
+        Fn::Base64: !Join
+          - ""
+          - - |
               #!/bin/bash
               set -euo pipefail
               dnf update -y
               dnf install -y docker git jq aws-cli
               systemctl enable --now docker
               usermod -aG docker ec2-user || true
-
-              # CFN injects literals below; bash uses $name form only (no ${}) so !Sub ignores them.
-              region="${AWS::Region}"
-              cost_profile="${CostProfile}"
-              db_secret_arn="${DbSecret}"
-              docs_bucket="${DocsBucket}"
-              user_pool_id="${UserPool}"
-              client_id="${UserPoolClient}"
-              ts_key="${TsKey}"
-
+              region="
+            - !Ref AWS::Region
+            - |
+              "
+              cost_profile="
+            - !Ref CostProfile
+            - |
+              "
+              db_secret_arn="
+            - !Ref DbSecret
+            - |
+              "
+              docs_bucket="
+            - !Ref DocsBucket
+            - |
+              "
+              user_pool_id="
+            - !Ref UserPool
+            - |
+              "
+              client_id="
+            - !Ref UserPoolClient
+            - |
+              "
+              ts_key="
+            - !Ref TailscaleAuthKey
+            - |
+              "
               mkdir -p /opt/mike-regulated
-              cat >/opt/mike-regulated/stack-outputs.env <<EOF
-              AWS_REGION=$region
-              S3_BUCKET_NAME=$docs_bucket
-              COGNITO_USER_POOL_ID=$user_pool_id
-              COGNITO_CLIENT_ID=$client_id
-              DB_SECRET_ARN=$db_secret_arn
-              REGULATED_MODE=true
-              COST_PROFILE=$cost_profile
-              PROJECT=mike-regulated
-              EOF
+              {
+                echo "AWS_REGION=$region"
+                echo "S3_BUCKET_NAME=$docs_bucket"
+                echo "COGNITO_USER_POOL_ID=$user_pool_id"
+                echo "COGNITO_CLIENT_ID=$client_id"
+                echo "DB_SECRET_ARN=$db_secret_arn"
+                echo "REGULATED_MODE=true"
+                echo "COST_PROFILE=$cost_profile"
+                echo "PROJECT=mike-regulated"
+              } > /opt/mike-regulated/stack-outputs.env
 
               if [ "$cost_profile" = "mvp" ]; then
                 for i in $(seq 1 30); do
@@ -672,7 +690,7 @@ Resources:
                   -v mike-pg-data:/var/lib/postgresql/data \
                   -p 127.0.0.1:5432:5432 \
                   postgres:16-alpine
-                merged=$(echo "$secret_json" | jq -c --arg h "127.0.0.1" --argjson p 5432 '. + {host:$h,port:$p}')
+                merged=$(echo "$secret_json" | jq -c --arg host "127.0.0.1" --argjson port 5432 '. + {host:$host,port:$port}')
                 aws secretsmanager put-secret-value --region "$region" --secret-id "$db_secret_arn" --secret-string "$merged" || true
                 echo "DATABASE_URL=postgres://$db_user@127.0.0.1:5432/$db_name" >> /opt/mike-regulated/stack-outputs.env
               fi
@@ -683,7 +701,7 @@ Resources:
               fi
 
               echo "mike-regulated bootstrap complete profile=$cost_profile $(date -u)" >> /var/log/mike-regulated-bootstrap.log
-            - TsKey: !Ref TailscaleAuthKey
+
       Tags:
         - Key: Name
           Value: mike-regulated
