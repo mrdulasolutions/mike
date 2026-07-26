@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { supabase } from "@/app/lib/supabase";
+import { getAccessToken, getApiBase } from "@/app/lib/accessToken";
 
 /**
  * /display returns PDF bytes (when the active version has a PDF rendition),
@@ -46,15 +46,10 @@ export function useFetchSingleDoc(
 
         (async () => {
             try {
-                const {
-                    data: { session },
-                } = await supabase.auth.getSession();
-                const token = session?.access_token;
+                const token = await getAccessToken();
                 if (cancelled) return;
 
-                const apiBase =
-                    process.env.NEXT_PUBLIC_API_BASE_URL ??
-                    "http://localhost:3001";
+                const apiBase = getApiBase();
                 const qs = versionId
                     ? `?version_id=${encodeURIComponent(versionId)}`
                     : "";
