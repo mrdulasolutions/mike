@@ -1,24 +1,34 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   Mike regulated workspace (HIPAA-aware commercial MVP, ITAR-conscious).
-  Private Tailscale access; RDS + S3 + Cognito + KMS. Does not co-mingle with Open WebUI VPC.
+  CostProfile=mvp (default): single small EC2, no NAT, Postgres on-box, S3+Cognito+KMS.
+  CostProfile=standard: NAT + private subnets + RDS (higher cost / production-shaped).
 
 Metadata:
   Project: mike-regulated
   Compliance: HIPAA-ITAR-commercial-mvp
 
 Parameters:
+  CostProfile:
+    Type: String
+    Default: mvp
+    AllowedValues: [mvp, standard]
+    Description: >
+      mvp ≈ lowest fixed cost (no NAT Gateway, no RDS; Postgres on EC2).
+      standard = private subnets + NAT + managed RDS (much more expensive).
   EnvironmentName:
     Type: String
-    Default: prod
+    Default: staging
     AllowedValues: [prod, staging]
   InstanceType:
     Type: String
-    Default: t3.large
-    AllowedValues: [t3.medium, t3.large, t3.xlarge, m6i.large]
+    Default: t3.medium
+    AllowedValues: [t3.small, t3.medium, t3.large, t3.xlarge, m6i.large]
   DbInstanceClass:
     Type: String
-    Default: db.t4g.medium
+    Default: db.t4g.micro
+    AllowedValues: [db.t4g.micro, db.t4g.small, db.t4g.medium]
+    Description: Only used when CostProfile=standard
   DbName:
     Type: String
     Default: mike
@@ -33,13 +43,11 @@ Parameters:
     Type: String
     Default: ""
     NoEcho: true
-    Description: Optional Tailscale auth key for first boot (can join manually later)
-  AllowedSshCidr:
-    Type: String
-    Default: "127.0.0.1/32"
-    Description: SSH is disabled in SG by default; parameter reserved for emergency break-glass
+    Description: Optional Tailscale auth key for first boot
 
 Conditions:
+  IsMvp: !Equals [!Ref CostProfile, mvp]
+  IsStandard: !Equals [!Ref CostProfile, standard]
   HasTailscaleKey: !Not [!Equals [!Ref TailscaleAuthKey, ""]]
 
 Resources:
@@ -49,7 +57,7 @@ Resources:
   RegulatedKey:
     Type: AWS::KMS::Key
     Properties:
-      Description: mike-regulated CMK for S3/RDS/Secrets
+      Description: mike-regulated CMK for S3/Secrets/(RDS)
       EnableKeyRotation: true
       KeyPolicy:
         Version: "2012-10-17"
@@ -81,6 +89,7 @@ Resources:
                   - !Sub "rds.${AWS::Region}.amazonaws.com"
                   - !Sub "secretsmanager.${AWS::Region}.amazonaws.com"
                   - !Sub "logs.${AWS::Region}.amazonaws.com"
+                  - !Sub "ec2.${AWS::Region}.amazonaws.com"
           - Sid: CloudWatchLogs
             Effect: Allow
             Principal:
@@ -103,7 +112,7 @@ Resources:
       TargetKeyId: !Ref RegulatedKey
 
   # ---------------------------------------------------------------------------
-  # Network
+  # Network — always a dedicated VPC; MVP uses 1 public subnet (no NAT)
   # ---------------------------------------------------------------------------
   Vpc:
     Type: AWS::EC2::VPC
@@ -118,6 +127,8 @@ Resources:
           Value: mike-regulated
         - Key: Compliance
           Value: HIPAA-ITAR-commercial-mvp
+        - Key: CostProfile
+          Value: !Ref CostProfile
 
   InternetGateway:
     Type: AWS::EC2::InternetGateway
@@ -145,6 +156,7 @@ Resources:
 
   PublicSubnetB:
     Type: AWS::EC2::Subnet
+    Condition: IsStandard
     Properties:
       VpcId: !Ref Vpc
       CidrBlock: 10.50.1.0/24
@@ -156,6 +168,7 @@ Resources:
 
   PrivateAppSubnetA:
     Type: AWS::EC2::Subnet
+    Condition: IsStandard
     Properties:
       VpcId: !Ref Vpc
       CidrBlock: 10.50.10.0/24
@@ -167,6 +180,7 @@ Resources:
 
   PrivateDbSubnetA:
     Type: AWS::EC2::Subnet
+    Condition: IsStandard
     Properties:
       VpcId: !Ref Vpc
       CidrBlock: 10.50.20.0/24
@@ -178,6 +192,7 @@ Resources:
 
   PrivateDbSubnetB:
     Type: AWS::EC2::Subnet
+    Condition: IsStandard
     Properties:
       VpcId: !Ref Vpc
       CidrBlock: 10.50.21.0/24
@@ -211,12 +226,15 @@ Resources:
 
   PublicSubnetBRouteAssoc:
     Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: IsStandard
     Properties:
       SubnetId: !Ref PublicSubnetB
       RouteTableId: !Ref PublicRouteTable
 
+  # NAT only for standard (biggest fixed-cost saver when skipped)
   NatEip:
     Type: AWS::EC2::EIP
+    Condition: IsStandard
     DependsOn: AttachGateway
     Properties:
       Domain: vpc
@@ -226,6 +244,7 @@ Resources:
 
   NatGateway:
     Type: AWS::EC2::NatGateway
+    Condition: IsStandard
     Properties:
       AllocationId: !GetAtt NatEip.AllocationId
       SubnetId: !Ref PublicSubnetA
@@ -235,6 +254,7 @@ Resources:
 
   PrivateRouteTable:
     Type: AWS::EC2::RouteTable
+    Condition: IsStandard
     Properties:
       VpcId: !Ref Vpc
       Tags:
@@ -243,6 +263,7 @@ Resources:
 
   PrivateDefaultRoute:
     Type: AWS::EC2::Route
+    Condition: IsStandard
     Properties:
       RouteTableId: !Ref PrivateRouteTable
       DestinationCidrBlock: 0.0.0.0/0
@@ -250,23 +271,25 @@ Resources:
 
   PrivateAppRouteAssoc:
     Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: IsStandard
     Properties:
       SubnetId: !Ref PrivateAppSubnetA
       RouteTableId: !Ref PrivateRouteTable
 
   PrivateDbARouteAssoc:
     Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: IsStandard
     Properties:
       SubnetId: !Ref PrivateDbSubnetA
       RouteTableId: !Ref PrivateRouteTable
 
   PrivateDbBRouteAssoc:
     Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: IsStandard
     Properties:
       SubnetId: !Ref PrivateDbSubnetB
       RouteTableId: !Ref PrivateRouteTable
 
-  # Flow logs
   FlowLogsRole:
     Type: AWS::IAM::Role
     Properties:
@@ -295,15 +318,15 @@ Resources:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: /mike-regulated/vpc-flow
-      RetentionInDays: 90
-      KmsKeyId: !GetAtt RegulatedKey.Arn
+      RetentionInDays: 30
+      # No KMS on log groups in MVP to avoid key-policy edge cases; enable later if required
 
   VpcFlowLog:
     Type: AWS::EC2::FlowLog
     Properties:
       ResourceType: VPC
       ResourceId: !Ref Vpc
-      TrafficType: ALL
+      TrafficType: REJECT
       LogDestinationType: cloud-watch-logs
       LogGroupName: !Ref FlowLogGroup
       DeliverLogsPermissionArn: !GetAtt FlowLogsRole.Arn
@@ -317,21 +340,19 @@ Resources:
   AppSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Mike app host — no public app ingress; Tailscale only
+      GroupDescription: Mike app — no public app ingress; Tailscale mesh only
       VpcId: !Ref Vpc
       SecurityGroupEgress:
         - IpProtocol: -1
           CidrIp: 0.0.0.0/0
-          Description: Outbound for Mantle, package updates, Tailscale
+          Description: Outbound Mantle, updates, Tailscale
       Tags:
         - Key: Name
           Value: mike-regulated-app-sg
 
-  # No inbound rules on App SG (Tailscale userspace / encrypted mesh).
-  # Emergency SSM uses instance profile, not SSH.
-
   DbSecurityGroup:
     Type: AWS::EC2::SecurityGroup
+    Condition: IsStandard
     Properties:
       GroupDescription: RDS only from app SG
       VpcId: !Ref Vpc
@@ -340,7 +361,6 @@ Resources:
           FromPort: 5432
           ToPort: 5432
           SourceSecurityGroupId: !Ref AppSecurityGroup
-          Description: Postgres from Mike app
       SecurityGroupEgress:
         - IpProtocol: -1
           CidrIp: 0.0.0.0/0
@@ -367,9 +387,6 @@ Resources:
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
-      LoggingConfiguration:
-        DestinationBucketName: !Ref LogsBucket
-        LogFilePrefix: s3-access/docs/
       LifecycleConfiguration:
         Rules:
           - Id: abort-incomplete
@@ -381,29 +398,6 @@ Resources:
           Value: mike-regulated
         - Key: Compliance
           Value: HIPAA-ITAR-commercial-mvp
-
-  LogsBucket:
-    Type: AWS::S3::Bucket
-    Properties:
-      BucketEncryption:
-        ServerSideEncryptionConfiguration:
-          - ServerSideEncryptionByDefault:
-              SSEAlgorithm: aws:kms
-              KMSMasterKeyID: !GetAtt RegulatedKey.Arn
-            BucketKeyEnabled: true
-      PublicAccessBlockConfiguration:
-        BlockPublicAcls: true
-        BlockPublicPolicy: true
-        IgnorePublicAcls: true
-        RestrictPublicBuckets: true
-      LifecycleConfiguration:
-        Rules:
-          - Id: expire-logs
-            Status: Enabled
-            ExpirationInDays: 365
-      Tags:
-        - Key: Project
-          Value: mike-regulated
 
   DocsBucketPolicy:
     Type: AWS::S3::BucketPolicy
@@ -423,44 +417,17 @@ Resources:
               Bool:
                 aws:SecureTransport: false
 
-  LogsBucketPolicy:
-    Type: AWS::S3::BucketPolicy
-    Properties:
-      Bucket: !Ref LogsBucket
-      PolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Sid: DenyInsecureTransport
-            Effect: Deny
-            Principal: "*"
-            Action: "s3:*"
-            Resource:
-              - !GetAtt LogsBucket.Arn
-              - !Sub "${LogsBucket.Arn}/*"
-            Condition:
-              Bool:
-                aws:SecureTransport: false
-          - Sid: AllowS3LogDelivery
-            Effect: Allow
-            Principal:
-              Service: logging.s3.amazonaws.com
-            Action: s3:PutObject
-            Resource: !Sub "${LogsBucket.Arn}/s3-access/*"
-            Condition:
-              StringEquals:
-                aws:SourceAccount: !Ref AWS::AccountId
-
   # ---------------------------------------------------------------------------
-  # Secrets + RDS
+  # Secrets + optional RDS
   # ---------------------------------------------------------------------------
   DbSecret:
     Type: AWS::SecretsManager::Secret
     Properties:
       Name: !Sub mike-regulated/${EnvironmentName}/db
-      Description: Mike regulated RDS credentials
+      Description: Mike DB credentials (RDS when standard; local Postgres when mvp)
       KmsKeyId: !Ref RegulatedKey
       GenerateSecretString:
-        SecretStringTemplate: !Sub '{"username":"${DbUsername}"}'
+        SecretStringTemplate: !Sub '{"username":"${DbUsername}","dbname":"${DbName}","engine":"postgres"}'
         GenerateStringKey: password
         PasswordLength: 32
         ExcludeCharacters: '"@/\\'
@@ -470,17 +437,16 @@ Resources:
 
   DbSubnetGroup:
     Type: AWS::RDS::DBSubnetGroup
+    Condition: IsStandard
     Properties:
       DBSubnetGroupDescription: mike-regulated db subnets
       SubnetIds:
         - !Ref PrivateDbSubnetA
         - !Ref PrivateDbSubnetB
-      Tags:
-        - Key: Name
-          Value: mike-regulated-db-subnets
 
   DbInstance:
     Type: AWS::RDS::DBInstance
+    Condition: IsStandard
     DeletionPolicy: Snapshot
     UpdateReplacePolicy: Snapshot
     Properties:
@@ -488,8 +454,8 @@ Resources:
       Engine: postgres
       EngineVersion: "16"
       DBInstanceClass: !Ref DbInstanceClass
-      AllocatedStorage: 50
-      MaxAllocatedStorage: 200
+      AllocatedStorage: 20
+      MaxAllocatedStorage: 100
       StorageType: gp3
       StorageEncrypted: true
       KmsKeyId: !Ref RegulatedKey
@@ -502,16 +468,12 @@ Resources:
       PubliclyAccessible: false
       MultiAZ: false
       BackupRetentionPeriod: 7
-      PreferredBackupWindow: "07:00-08:00"
-      PreferredMaintenanceWindow: "sun:08:00-sun:09:00"
       DeletionProtection: true
       EnableCloudwatchLogsExports:
         - postgresql
       Tags:
         - Key: Project
           Value: mike-regulated
-        - Key: Compliance
-          Value: HIPAA-ITAR-commercial-mvp
 
   # ---------------------------------------------------------------------------
   # Cognito
@@ -539,7 +501,6 @@ Resources:
         RecoveryMechanisms:
           - Name: verified_email
             Priority: 1
-      # Advanced Security (Plus) can be enabled later; OFF keeps pool on standard tier.
       UserPoolAddOns:
         AdvancedSecurityMode: "OFF"
       Schema:
@@ -548,7 +509,7 @@ Resources:
           Mutable: true
       UserPoolTags:
         Project: mike-regulated
-        Compliance: HIPAA-ITAR-commercial-mvp
+        CostProfile: !Ref CostProfile
 
   UserPoolClient:
     Type: AWS::Cognito::UserPoolClient
@@ -587,7 +548,6 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
-        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
       Policies:
         - PolicyName: mike-regulated-app
           PolicyDocument:
@@ -608,6 +568,7 @@ Resources:
                 Action:
                   - secretsmanager:GetSecretValue
                   - secretsmanager:DescribeSecret
+                  - secretsmanager:PutSecretValue
                 Resource:
                   - !Ref DbSecret
                   - !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:mike-regulated/*
@@ -637,8 +598,7 @@ Resources:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: /mike-regulated/app
-      RetentionInDays: 90
-      KmsKeyId: !GetAtt RegulatedKey.Arn
+      RetentionInDays: 30
 
   AppInstance:
     Type: AWS::EC2::Instance
@@ -646,13 +606,15 @@ Resources:
       InstanceType: !Ref InstanceType
       ImageId: !Ref LatestAmiId
       IamInstanceProfile: !Ref AppInstanceProfile
-      SubnetId: !Ref PublicSubnetA
+      # MVP: public subnet for outbound without NAT (~$32/mo saved).
+      # Standard: private app subnet via NAT.
+      SubnetId: !If [IsMvp, !Ref PublicSubnetA, !Ref PrivateAppSubnetA]
       SecurityGroupIds:
         - !Ref AppSecurityGroup
       BlockDeviceMappings:
         - DeviceName: /dev/xvda
           Ebs:
-            VolumeSize: 40
+            VolumeSize: !If [IsMvp, 30, 40]
             VolumeType: gp3
             Encrypted: true
             KmsKeyId: !Ref RegulatedKey
@@ -667,28 +629,59 @@ Resources:
             #!/bin/bash
             set -euo pipefail
             dnf update -y
-            dnf install -y docker git jq
+            dnf install -y docker git jq aws-cli
             systemctl enable --now docker
             usermod -aG docker ec2-user || true
 
-            # CloudWatch agent optional — logs go to journal for now
+            REGION="${AWS::Region}"
+            COST_PROFILE="${CostProfile}"
+            DB_SECRET_ARN="${DbSecret}"
+            DOCS_BUCKET="${DocsBucket}"
+
             mkdir -p /opt/mike-regulated
             cat >/opt/mike-regulated/stack-outputs.env <<EOF
-            AWS_REGION=${AWS::Region}
-            S3_BUCKET_NAME=${DocsBucket}
+            AWS_REGION=${REGION}
+            S3_BUCKET_NAME=${DOCS_BUCKET}
             COGNITO_USER_POOL_ID=${UserPool}
             COGNITO_CLIENT_ID=${UserPoolClient}
-            DB_SECRET_ARN=${DbSecret}
+            DB_SECRET_ARN=${DB_SECRET_ARN}
             REGULATED_MODE=true
+            COST_PROFILE=${COST_PROFILE}
             PROJECT=mike-regulated
             EOF
+
+            # MVP: run Postgres on the instance (encrypted EBS) instead of RDS
+            if [ "${COST_PROFILE}" = "mvp" ]; then
+              # Wait for secret
+              for i in $(seq 1 30); do
+                SECRET_JSON=$(aws secretsmanager get-secret-value --region "$REGION" --secret-id "$DB_SECRET_ARN" --query SecretString --output text 2>/dev/null) && break
+                sleep 2
+              done
+              DB_USER=$(echo "$SECRET_JSON" | jq -r .username)
+              DB_PASS=$(echo "$SECRET_JSON" | jq -r .password)
+              DB_NAME=$(echo "$SECRET_JSON" | jq -r .dbname)
+              docker volume create mike-pg-data || true
+              docker rm -f mike-postgres 2>/dev/null || true
+              docker run -d --name mike-postgres --restart unless-stopped \
+                -e POSTGRES_USER="$DB_USER" \
+                -e POSTGRES_PASSWORD="$DB_PASS" \
+                -e POSTGRES_DB="$DB_NAME" \
+                -v mike-pg-data:/var/lib/postgresql/data \
+                -p 127.0.0.1:5432:5432 \
+                postgres:16-alpine
+              # Publish host endpoint into secret for app config
+              HOST_IP=$(hostname -I | awk '{print $1}')
+              MERGED=$(echo "$SECRET_JSON" | jq -c --arg h "127.0.0.1" --argjson p 5432 '. + {host:$h,port:$p}')
+              aws secretsmanager put-secret-value --region "$REGION" --secret-id "$DB_SECRET_ARN" --secret-string "$MERGED" || true
+              echo "DATABASE_URL=postgres://$DB_USER@127.0.0.1:5432/$DB_NAME" >> /opt/mike-regulated/stack-outputs.env
+            fi
 
             if [ -n "${TsKey}" ]; then
               curl -fsSL https://tailscale.com/install.sh | sh
               tailscale up --auth-key="${TsKey}" --hostname=mike-regulated --ssh=false || true
             fi
 
-            echo "mike-regulated bootstrap complete $(date -u)" >> /var/log/mike-regulated-bootstrap.log
+            echo "mike-regulated bootstrap complete profile=${COST_PROFILE} $(date -u)" >> /var/log/mike-regulated-bootstrap.log
           - TsKey: !Ref TailscaleAuthKey
       Tags:
         - Key: Name
@@ -697,6 +690,8 @@ Resources:
           Value: mike-regulated
         - Key: Compliance
           Value: HIPAA-ITAR-commercial-mvp
+        - Key: CostProfile
+          Value: !Ref CostProfile
         - Key: Environment
           Value: !Ref EnvironmentName
 
@@ -718,20 +713,18 @@ Resources:
           Value: mike-regulated
 
 Outputs:
+  CostProfile:
+    Value: !Ref CostProfile
   VpcId:
     Value: !Ref Vpc
-    Export:
-      Name: !Sub ${AWS::StackName}-VpcId
   DocsBucketName:
     Value: !Ref DocsBucket
-    Export:
-      Name: !Sub ${AWS::StackName}-DocsBucket
-  LogsBucketName:
-    Value: !Ref LogsBucket
   DbEndpoint:
-    Value: !GetAtt DbInstance.Endpoint.Address
-  DbPort:
-    Value: !GetAtt DbInstance.Endpoint.Port
+    Description: RDS address when standard; empty-ish when mvp (use 127.0.0.1 on host)
+    Value: !If
+      - IsStandard
+      - !GetAtt DbInstance.Endpoint.Address
+      - 127.0.0.1
   DbSecretArn:
     Value: !Ref DbSecret
   MantleSecretArn:
@@ -744,10 +737,9 @@ Outputs:
     Value: !Ref AppInstance
   AppPublicIp:
     Value: !GetAtt AppInstance.PublicIp
-    Description: Bootstrap IP only; app should be accessed via Tailscale
-  AppRoleArn:
-    Value: !GetAtt AppRole.Arn
-  KmsKeyArn:
-    Value: !GetAtt RegulatedKey.Arn
-  Region:
-    Value: !Ref AWS::Region
+    Description: Bootstrap/SSM only — app access via Tailscale
+  EstimatedMonthlyHint:
+    Value: !If
+      - IsMvp
+      - "~$30-60/mo (t3.medium + EBS + S3/KMS; no NAT, no RDS)"
+      - "~$120-200+/mo (NAT + RDS + larger host)"

@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
-# Deploy / update the mike-regulated CloudFormation stack.
+# Deploy / update the mike-regulated CloudFormation stack (cheap MVP by default).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 STACK_NAME="${STACK_NAME:-mike-regulated}"
 REGION="${AWS_REGION:-us-east-1}"
 TEMPLATE="${ROOT}/cfn/mike-regulated.yaml"
-ENV_NAME="${ENVIRONMENT_NAME:-prod}"
+ENV_NAME="${ENVIRONMENT_NAME:-staging}"
+COST_PROFILE="${COST_PROFILE:-mvp}"
 
 ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
-echo "Account=${ACCOUNT} Region=${REGION} Stack=${STACK_NAME}"
+echo "Account=${ACCOUNT} Region=${REGION} Stack=${STACK_NAME} CostProfile=${COST_PROFILE}"
 
 if [[ "${ACCOUNT}" != "547519647117" ]]; then
   echo "WARNING: expected Privus account 547519647117, got ${ACCOUNT}" >&2
@@ -19,8 +20,9 @@ fi
 
 PARAMS=(
   "ParameterKey=EnvironmentName,ParameterValue=${ENV_NAME}"
-  "ParameterKey=InstanceType,ParameterValue=${INSTANCE_TYPE:-t3.large}"
-  "ParameterKey=DbInstanceClass,ParameterValue=${DB_INSTANCE_CLASS:-db.t4g.medium}"
+  "ParameterKey=CostProfile,ParameterValue=${COST_PROFILE}"
+  "ParameterKey=InstanceType,ParameterValue=${INSTANCE_TYPE:-t3.medium}"
+  "ParameterKey=DbInstanceClass,ParameterValue=${DB_INSTANCE_CLASS:-db.t4g.micro}"
 )
 
 if [[ -n "${TS_AUTHKEY:-}" ]]; then
@@ -39,7 +41,7 @@ else
   WAIT=stack-create-complete
 fi
 
-echo "Running ${ACTION}..."
+echo "Running ${ACTION} (profile=${COST_PROFILE})..."
 set +e
 OUT=$(aws cloudformation "${ACTION}" \
   --region "${REGION}" \
@@ -50,6 +52,7 @@ OUT=$(aws cloudformation "${ACTION}" \
   --tags \
     Key=Project,Value=mike-regulated \
     Key=Compliance,Value=HIPAA-ITAR-commercial-mvp \
+    Key=CostProfile,Value="${COST_PROFILE}" \
     Key=Environment,Value="${ENV_NAME}" \
   2>&1)
 RC=$?
@@ -63,7 +66,11 @@ if [[ $RC -ne 0 ]]; then
     exit $RC
   fi
 else
-  echo "Waiting for ${WAIT} (this can take 15–25 minutes for RDS)..."
+  if [[ "${COST_PROFILE}" == "standard" ]]; then
+    echo "Waiting for ${WAIT} (RDS can take 15–25 minutes)..."
+  else
+    echo "Waiting for ${WAIT} (MVP usually ~3–8 minutes)..."
+  fi
   aws cloudformation wait "${WAIT}" --region "${REGION}" --stack-name "${STACK_NAME}"
 fi
 
@@ -77,8 +84,7 @@ aws cloudformation describe-stacks \
 
 echo ""
 echo "Next:"
-echo "  1. Set Mantle key: aws secretsmanager put-secret-value --secret-id mike-regulated/${ENV_NAME}/mantle --secret-string file://mantle.json"
-echo "  2. Join Tailscale on the instance if not done via user-data"
-echo "  3. Continue app deploy on branch regulated/aws-native"
-echo ""
-echo "Compliance: do not load real PHI/ITAR data until boundary review is complete."
+echo "  1. Put Mantle key into secret mike-regulated/${ENV_NAME}/mantle"
+echo "  2. Tailscale join (if not via TS_AUTHKEY)"
+echo "  3. App deploy on branch regulated/aws-native"
+echo "See infra/mike-regulated/docs/COST.md for profile tradeoffs."
