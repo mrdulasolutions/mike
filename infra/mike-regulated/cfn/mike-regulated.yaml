@@ -14,7 +14,7 @@ Parameters:
     Default: mvp
     AllowedValues: [mvp, standard]
     Description: >
-      mvp ≈ lowest fixed cost (no NAT Gateway, no RDS; Postgres on EC2).
+      mvp ~ lowest fixed cost (no NAT Gateway, no RDS; Postgres on EC2).
       standard = private subnets + NAT + managed RDS (much more expensive).
   EnvironmentName:
     Type: String
@@ -112,7 +112,7 @@ Resources:
       TargetKeyId: !Ref RegulatedKey
 
   # ---------------------------------------------------------------------------
-  # Network — always a dedicated VPC; MVP uses 1 public subnet (no NAT)
+  # Network - always a dedicated VPC; MVP uses 1 public subnet (no NAT)
   # ---------------------------------------------------------------------------
   Vpc:
     Type: AWS::EC2::VPC
@@ -340,7 +340,7 @@ Resources:
   AppSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Mike app — no public app ingress; Tailscale mesh only
+      GroupDescription: Mike app - no public app ingress; Tailscale mesh only
       VpcId: !Ref Vpc
       SecurityGroupEgress:
         - IpProtocol: -1
@@ -756,7 +756,7 @@ Outputs:
     Value: !Ref AppInstance
   AppPublicIp:
     Value: !GetAtt AppInstance.PublicIp
-    Description: Bootstrap/SSM only — app access via Tailscale
+    Description: Bootstrap/SSM only - app access via Tailscale
   EstimatedMonthlyHint:
     Value: !If
       - IsMvp
