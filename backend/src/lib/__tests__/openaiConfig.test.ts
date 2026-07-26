@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  assertSafeOpenAIBaseUrl,
+  envOpenAIMainModels,
   getOpenAIApiMode,
   getOpenAIBaseUrl,
   humanizeModelId,
@@ -121,5 +123,16 @@ describe("env helpers", () => {
     setEnv("OPENAI_MODEL_LABELS", "xai.grok-4.3:Grok 4.3");
     expect(humanizeModelId("xai.grok-4.3")).toBe("Grok 4.3");
     expect(humanizeModelId("my-custom-model")).toMatch(/My Custom Model/i);
+  });
+
+  it("rejects credentials embedded in base URL", () => {
+    expect(() =>
+      assertSafeOpenAIBaseUrl("https://user:pass@api.openai.com/v1"),
+    ).toThrow(/username\/password/);
+  });
+
+  it("rejects unsafe model ids in OPENAI_MODELS", () => {
+    setEnv("OPENAI_MODELS", "ok-model, bad model, shell;rm");
+    expect(envOpenAIMainModels()).toEqual(["ok-model"]);
   });
 });

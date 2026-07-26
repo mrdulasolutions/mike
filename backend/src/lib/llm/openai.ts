@@ -11,6 +11,7 @@ import {
   getOpenAIApiMode,
   getOpenAIBaseUrl,
   openAIChatCompletionsUrl,
+  openAIRequestSignal,
   openAIResponsesUrl,
   type OpenAIApiMode,
 } from "./openaiConfig";
@@ -110,10 +111,17 @@ function toResponseInput(messages: LlmMessage[]): ResponseInputItem[] {
   }));
 }
 
-function extractSseJson(buffer: string): { events: unknown[]; rest: string } {
+function extractSseJson(
+  buffer: string,
+  opts?: { flush?: boolean },
+): { events: unknown[]; rest: string } {
   const events: unknown[] = [];
   const chunks = buffer.split(/\n\n/);
-  const rest = chunks.pop() ?? "";
+  const rest = opts?.flush ? "" : (chunks.pop() ?? "");
+  if (opts?.flush && chunks.length === 0 && buffer.trim()) {
+    // Final partial frame without trailing blank line.
+    chunks.push(buffer);
+  }
 
   for (const chunk of chunks) {
     const dataLines = chunk
@@ -127,7 +135,7 @@ function extractSseJson(buffer: string): { events: unknown[]; rest: string } {
       try {
         events.push(JSON.parse(data));
       } catch {
-        // Incomplete events stay buffered until the next read.
+        // Incomplete events stay buffered until the next read (or drop on flush).
       }
     }
   }
@@ -192,26 +200,56 @@ function shouldAppendCourtlistenerCitationReminder(call: NormalizedToolCall) {
   return COURTLISTENER_CITATION_REMINDER_TOOL_NAMES.has(call.name);
 }
 
+function requestHost(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return "openai-compatible-endpoint";
+  }
+}
+
+function truncateErrorBody(body: string, max = 400): string {
+  const cleaned = body.replace(/\s+/g, " ").trim();
+  if (cleaned.length <= max) return cleaned;
+  return `${cleaned.slice(0, max)}…`;
+}
+
 async function postJson(params: {
   url: string;
   apiKey: string;
   body: unknown;
   signal?: AbortSignal;
 }): Promise<Response> {
-  const response = await fetch(params.url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${params.apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(params.body),
-    signal: params.signal,
-  });
+  const signal = openAIRequestSignal(params.signal);
+  let response: Response;
+  try {
+    response = await fetch(params.url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${params.apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(params.body),
+      signal,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      if (params.signal?.aborted) throw abortError();
+      const err = new Error(
+        `OpenAI request timed out talking to ${requestHost(params.url)}.`,
+      );
+      err.name = "TimeoutError";
+      throw err;
+    }
+    throw error;
+  }
 
   if (!response.ok) {
     const text = await response.text().catch(() => "");
     const err = new Error(
-      `OpenAI request failed (${response.status}) at ${params.url}: ${text || response.statusText}`,
+      `OpenAI request failed (${response.status}) via ${requestHost(params.url)}: ${
+        truncateErrorBody(text) || response.statusText
+      }`,
     );
     (err as { status?: number }).status = response.status;
     throw err;
@@ -305,29 +343,8 @@ async function streamOpenAIResponses(
       let buffer = "";
       let sawReasoning = false;
 
-      while (true) {
-        throwIfAborted(params.abortSignal);
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        const decoded = decoder.decode(value, { stream: true });
-        logRawLlmStream({
-          provider: "openai",
-          model,
-          iteration: iter,
-          label: "sse_chunk",
-          payload: decoded,
-        });
-        rawStreamRecorder?.record({
-          iteration: iter,
-          label: "sse_chunk",
-          payload: decoded,
-        });
-        buffer += decoded;
-        const extracted = extractSseJson(buffer);
-        buffer = extracted.rest;
-
-        for (const event of extracted.events as ResponseStreamEvent[]) {
+      const handleResponseEvents = (events: ResponseStreamEvent[]) => {
+        for (const event of events) {
           logRawLlmStream({
             provider: "openai",
             model,
@@ -385,6 +402,41 @@ async function streamOpenAIResponses(
             }
             toolCalls.push(call);
           }
+        }
+      };
+
+      try {
+        while (true) {
+          throwIfAborted(params.abortSignal);
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          const decoded = decoder.decode(value, { stream: true });
+          logRawLlmStream({
+            provider: "openai",
+            model,
+            iteration: iter,
+            label: "sse_chunk",
+            payload: decoded,
+          });
+          rawStreamRecorder?.record({
+            iteration: iter,
+            label: "sse_chunk",
+            payload: decoded,
+          });
+          buffer += decoded;
+          const extracted = extractSseJson(buffer);
+          buffer = extracted.rest;
+          handleResponseEvents(extracted.events as ResponseStreamEvent[]);
+        }
+        buffer += decoder.decode();
+        const trailing = extractSseJson(buffer, { flush: true });
+        handleResponseEvents(trailing.events as ResponseStreamEvent[]);
+      } finally {
+        try {
+          reader.releaseLock();
+        } catch {
+          // ignore
         }
       }
 
@@ -521,29 +573,8 @@ async function streamOpenAIChat(
       >();
       const startedToolCallIds = new Set<string>();
 
-      while (true) {
-        throwIfAborted(params.abortSignal);
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        const decoded = decoder.decode(value, { stream: true });
-        logRawLlmStream({
-          provider: "openai",
-          model,
-          iteration: iter,
-          label: "sse_chunk",
-          payload: decoded,
-        });
-        rawStreamRecorder?.record({
-          iteration: iter,
-          label: "sse_chunk",
-          payload: decoded,
-        });
-        buffer += decoded;
-        const extracted = extractSseJson(buffer);
-        buffer = extracted.rest;
-
-        for (const event of extracted.events as ChatStreamChunk[]) {
+      const handleChatEvents = (events: ChatStreamChunk[]) => {
+        for (const event of events) {
           logRawLlmStream({
             provider: "openai",
             model,
@@ -570,7 +601,10 @@ async function streamOpenAIChat(
           const delta = event.choices?.[0]?.delta;
           if (!delta) continue;
 
-          if (typeof delta.reasoning_content === "string" && delta.reasoning_content) {
+          if (
+            typeof delta.reasoning_content === "string" &&
+            delta.reasoning_content
+          ) {
             sawReasoning = true;
             callbacks.onReasoningDelta?.(delta.reasoning_content);
           }
@@ -591,7 +625,9 @@ async function streamOpenAIChat(
               };
               if (tc.id) acc.id = tc.id;
               if (tc.function?.name) acc.name += tc.function.name;
-              if (tc.function?.arguments) acc.arguments += tc.function.arguments;
+              if (tc.function?.arguments) {
+                acc.arguments += tc.function.arguments;
+              }
               toolAcc.set(index, acc);
 
               if (acc.id && !startedToolCallIds.has(acc.id)) {
@@ -604,6 +640,41 @@ async function streamOpenAIChat(
               }
             }
           }
+        }
+      };
+
+      try {
+        while (true) {
+          throwIfAborted(params.abortSignal);
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          const decoded = decoder.decode(value, { stream: true });
+          logRawLlmStream({
+            provider: "openai",
+            model,
+            iteration: iter,
+            label: "sse_chunk",
+            payload: decoded,
+          });
+          rawStreamRecorder?.record({
+            iteration: iter,
+            label: "sse_chunk",
+            payload: decoded,
+          });
+          buffer += decoded;
+          const extracted = extractSseJson(buffer);
+          buffer = extracted.rest;
+          handleChatEvents(extracted.events as ChatStreamChunk[]);
+        }
+        buffer += decoder.decode();
+        const trailing = extractSseJson(buffer, { flush: true });
+        handleChatEvents(trailing.events as ChatStreamChunk[]);
+      } finally {
+        try {
+          reader.releaseLock();
+        } catch {
+          // ignore
         }
       }
 

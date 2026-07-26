@@ -101,11 +101,15 @@ export function providerForModel(model: string): Provider {
   throw new Error(`Unknown model id: ${model}`);
 }
 
+function isSafeModelId(id: string): boolean {
+  return id.length > 0 && id.length <= 128 && /^[\w.:/=+\-@]+$/.test(id);
+}
+
 export function resolveModel(
   id: string | null | undefined,
   fallback: string,
 ): string {
-  if (!id?.trim()) return fallback;
+  if (!id?.trim() || !isSafeModelId(id)) return fallback;
   if (builtInCatalog().has(id)) return id;
   // When OpenAI-compat any-model mode is on, accept arbitrary non-Anthropic /
   // non-Gemini ids (Bedrock Mantle, Cerebras, local vLLM, etc.).
