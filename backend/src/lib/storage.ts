@@ -1,12 +1,12 @@
 /**
- * Cloudflare R2 storage utilities for Mike document management.
- * R2 is S3-compatible — uses @aws-sdk/client-s3.
+ * Object storage for Mike document management.
  *
- * Required env vars:
- *   R2_ENDPOINT_URL     — https://<account-id>.r2.cloudflarestorage.com
- *   R2_ACCESS_KEY_ID    — R2 API token (Access Key ID)
- *   R2_SECRET_ACCESS_KEY — R2 API token (Secret Access Key)
- *   R2_BUCKET_NAME      — bucket name (default: "mike")
+ * Two modes:
+ * 1) Cloudflare R2 (legacy / non-regulated): set R2_ENDPOINT_URL + R2 keys
+ * 2) Native AWS S3 (regulated): set S3_BUCKET_NAME (+ AWS_REGION).
+ *    Uses the default credential chain (instance role / env / shared config).
+ *
+ * Prefer S3 mode for HIPAA / regulated deploys under the AWS BAA.
  */
 
 import {
@@ -22,33 +22,55 @@ const GetObjectCommand = (S3Commands as any).GetObjectCommand;
 
 let cachedClient: S3Client | undefined;
 
+function useNativeS3(): boolean {
+  const bucket = process.env.S3_BUCKET_NAME?.trim();
+  const r2 = process.env.R2_ENDPOINT_URL?.trim();
+  // Explicit S3 bucket without R2 endpoint → native S3
+  return !!bucket && !r2;
+}
+
 function getClient(): S3Client {
   if (!cachedClient) {
-    cachedClient = new S3Client({
-      region: "auto",
-      endpoint: process.env.R2_ENDPOINT_URL!,
-      forcePathStyle: true,
-      credentials: {
-        accessKeyId: process.env.R2_ACCESS_KEY_ID!,
-        secretAccessKey: process.env.R2_SECRET_ACCESS_KEY!,
-      },
-    });
+    if (useNativeS3()) {
+      cachedClient = new S3Client({
+        region:
+          process.env.AWS_REGION?.trim() ||
+          process.env.AWS_DEFAULT_REGION?.trim() ||
+          "us-east-1",
+      });
+    } else {
+      cachedClient = new S3Client({
+        region: "auto",
+        endpoint: process.env.R2_ENDPOINT_URL!,
+        forcePathStyle: true,
+        credentials: {
+          accessKeyId: process.env.R2_ACCESS_KEY_ID!,
+          secretAccessKey: process.env.R2_SECRET_ACCESS_KEY!,
+        },
+      });
+    }
   }
   return cachedClient;
 }
 
-const BUCKET = process.env.R2_BUCKET_NAME ?? "mike";
+function bucketName(): string {
+  if (useNativeS3()) {
+    return process.env.S3_BUCKET_NAME!.trim();
+  }
+  return process.env.R2_BUCKET_NAME?.trim() || "mike";
+}
 
 export const storageEnabled = Boolean(
-  process.env.R2_ENDPOINT_URL &&
-  process.env.R2_ACCESS_KEY_ID &&
-  process.env.R2_SECRET_ACCESS_KEY,
+  useNativeS3() ||
+    (process.env.R2_ENDPOINT_URL &&
+      process.env.R2_ACCESS_KEY_ID &&
+      process.env.R2_SECRET_ACCESS_KEY),
 );
 
 function requireStorageConfig(): void {
   if (!storageEnabled) {
     throw new Error(
-      "R2_ENDPOINT_URL, R2_ACCESS_KEY_ID, and R2_SECRET_ACCESS_KEY must be set",
+      "Storage is not configured. Set S3_BUCKET_NAME for AWS S3, or R2_ENDPOINT_URL + R2 keys for Cloudflare R2.",
     );
   }
 }
@@ -66,7 +88,7 @@ export async function uploadFile(
   const client = getClient();
   await client.send(
     new PutObjectCommand({
-      Bucket: BUCKET,
+      Bucket: bucketName(),
       Key: key,
       Body: Buffer.from(content),
       ContentType: contentType,
@@ -83,7 +105,7 @@ export async function downloadFile(key: string): Promise<ArrayBuffer | null> {
   try {
     const client = getClient();
     const response = (await client.send(
-      new GetObjectCommand({ Bucket: BUCKET, Key: key }),
+      new GetObjectCommand({ Bucket: bucketName(), Key: key }),
     )) as any;
     if (!response.Body) return null;
     const bytes = await response.Body.transformToByteArray();
@@ -101,7 +123,7 @@ export async function listFiles(prefix: string): Promise<string[]> {
   do {
     const response = await client.send(
       new ListObjectsV2Command({
-        Bucket: BUCKET,
+        Bucket: bucketName(),
         Prefix: prefix,
         ContinuationToken,
       }),
@@ -121,7 +143,9 @@ export async function listFiles(prefix: string): Promise<string[]> {
 export async function deleteFile(key: string): Promise<void> {
   if (!storageEnabled) return;
   const client = getClient();
-  await client.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: key }));
+  await client.send(
+    new DeleteObjectCommand({ Bucket: bucketName(), Key: key }),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -137,14 +161,14 @@ export async function getSignedUrl(
   try {
     const client = getClient();
     // Override the response Content-Disposition so the browser uses this
-    // filename on download, instead of the last path segment of the R2 key
+    // filename on download, instead of the last path segment of the key
     // (which includes the document UUID). The `download` attribute on <a>
     // is ignored for cross-origin URLs, so we have to set it server-side.
     const responseContentDisposition = downloadFilename
       ? buildContentDisposition("attachment", downloadFilename)
       : undefined;
     const command = new GetObjectCommand({
-      Bucket: BUCKET,
+      Bucket: bucketName(),
       Key: key,
       ResponseContentDisposition: responseContentDisposition,
     }) as any;
