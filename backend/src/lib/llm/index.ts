@@ -6,6 +6,7 @@ import type { StreamChatParams, StreamChatResult, UserApiKeys } from "./types";
 
 export * from "./types";
 export * from "./models";
+export * from "./openaiConfig";
 
 export async function streamChatWithTools(
     params: StreamChatParams,

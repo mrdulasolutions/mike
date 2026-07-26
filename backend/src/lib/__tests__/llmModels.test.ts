@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect } from "vitest";
 import {
     CLAUDE_MAIN_MODELS,
     GEMINI_MAIN_MODELS,
@@ -14,7 +14,23 @@ import {
     DEFAULT_TABULAR_MODEL,
     providerForModel,
     resolveModel,
+    getOpenAIMainModels,
+    listPublicModels,
 } from "../llm/models";
+
+const ENV_KEYS = [
+    "OPENAI_MODELS",
+    "OPENAI_MID_MODELS",
+    "OPENAI_LOW_MODELS",
+    "OPENAI_COMPAT_ANY_MODEL",
+    "OPENAI_MODEL_LABELS",
+] as const;
+
+afterEach(() => {
+    for (const key of ENV_KEYS) {
+        delete process.env[key];
+    }
+});
 
 // ---------------------------------------------------------------------------
 // providerForModel
@@ -39,9 +55,21 @@ describe("providerForModel", () => {
         }
     });
 
+    it("maps env OPENAI_MODELS ids to openai", () => {
+        process.env.OPENAI_MODELS = "xai.grok-4.3,zai.glm-5";
+        expect(providerForModel("xai.grok-4.3")).toBe("openai");
+        expect(providerForModel("zai.glm-5")).toBe("openai");
+    });
+
     it("throws on an unknown model id", () => {
         expect(() => providerForModel("llama-3")).toThrow(/Unknown model id/);
         expect(() => providerForModel("")).toThrow(/Unknown model id/);
+    });
+
+    it("routes arbitrary models to openai when OPENAI_COMPAT_ANY_MODEL is on", () => {
+        process.env.OPENAI_COMPAT_ANY_MODEL = "true";
+        expect(providerForModel("llama-3")).toBe("openai");
+        expect(providerForModel("openai.gpt-oss-120b")).toBe("openai");
     });
 
     it("infers by prefix only, without validating against the catalog", () => {
@@ -69,6 +97,20 @@ describe("resolveModel", () => {
     it("falls back for unknown model ids", () => {
         expect(resolveModel("gpt-3.5-turbo", DEFAULT_MAIN_MODEL)).toBe(
             DEFAULT_MAIN_MODEL,
+        );
+    });
+
+    it("accepts custom openai models from env", () => {
+        process.env.OPENAI_MODELS = "xai.grok-4.3";
+        expect(resolveModel("xai.grok-4.3", DEFAULT_MAIN_MODEL)).toBe(
+            "xai.grok-4.3",
+        );
+    });
+
+    it("accepts any non-claude/gemini id when compat mode is on", () => {
+        process.env.OPENAI_COMPAT_ANY_MODEL = "1";
+        expect(resolveModel("my-local-model", DEFAULT_MAIN_MODEL)).toBe(
+            "my-local-model",
         );
     });
 
@@ -115,5 +157,19 @@ describe("default models", () => {
         expect(providerForModel(DEFAULT_MAIN_MODEL)).toBe("gemini");
         expect(providerForModel(DEFAULT_TITLE_MODEL)).toBe("gemini");
         expect(providerForModel(DEFAULT_TABULAR_MODEL)).toBe("gemini");
+    });
+
+    it("getOpenAIMainModels honors OPENAI_MODELS", () => {
+        process.env.OPENAI_MODELS = "a,b";
+        expect(getOpenAIMainModels()).toEqual(["a", "b"]);
+    });
+
+    it("listPublicModels includes env openai models", () => {
+        process.env.OPENAI_MODELS = "xai.grok-4.3";
+        process.env.OPENAI_MODEL_LABELS = "xai.grok-4.3:Grok 4.3";
+        const { main } = listPublicModels();
+        const hit = main.find((m) => m.id === "xai.grok-4.3");
+        expect(hit?.group).toBe("OpenAI");
+        expect(hit?.label).toBe("Grok 4.3");
     });
 });

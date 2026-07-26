@@ -6,7 +6,7 @@ import {
     DEFAULT_TABULAR_MODEL,
     DEFAULT_TITLE_MODEL,
     CLAUDE_LOW_MODELS,
-    OPENAI_LOW_MODELS,
+    getOpenAILowModels,
     resolveModel,
 } from "../lib/llm";
 import {
@@ -279,7 +279,7 @@ function serializeProfile(row: UserProfileRow, apiKeyStatus?: ApiKeyStatus) {
     const titleFallback = apiKeyStatus?.gemini
         ? DEFAULT_TITLE_MODEL
         : apiKeyStatus?.openai
-          ? OPENAI_LOW_MODELS[0]
+          ? (getOpenAILowModels()[0] ?? "gpt-5.4-lite")
           : apiKeyStatus?.claude
             ? CLAUDE_LOW_MODELS[0]
             : DEFAULT_TITLE_MODEL;

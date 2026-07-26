@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ChevronDown, Check, AlertCircle } from "lucide-react";
 import {
     DropdownMenu,
@@ -13,6 +13,11 @@ import {
     LiquidDropdownItem,
 } from "@/app/components/ui/liquid-dropdown";
 import { isModelAvailable } from "@/app/lib/modelAvailability";
+import {
+    BUILTIN_MAIN_MODELS,
+    BUILTIN_SETTINGS_MODELS,
+    fetchModelCatalog,
+} from "@/app/lib/modelCatalog";
 import type { ApiKeyState } from "@/app/lib/mikeApi";
 
 export interface ModelOption {
@@ -21,28 +26,11 @@ export interface ModelOption {
     group: "Anthropic" | "Google" | "OpenAI";
 }
 
-export const MODELS: ModelOption[] = [
-    { id: "claude-fable-5", label: "Claude Fable 5", group: "Anthropic" },
-    { id: "claude-opus-4-8", label: "Claude Opus 4.8", group: "Anthropic" },
-    { id: "claude-opus-4-7", label: "Claude Opus 4.7", group: "Anthropic" },
-    { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", group: "Anthropic" },
-    { id: "gemini-3.5-flash", label: "Gemini 3.5 Flash", group: "Google" },
-    { id: "gemini-3.1-pro-preview", label: "Gemini 3.1 Pro", group: "Google" },
-    { id: "gemini-3-flash-preview", label: "Gemini 3 Flash", group: "Google" },
-    { id: "gpt-5.5", label: "GPT-5.5", group: "OpenAI" },
-    { id: "gpt-5.4", label: "GPT-5.4", group: "OpenAI" },
-];
+/** Default main-chat models (before /config/models loads). */
+export const MODELS: ModelOption[] = BUILTIN_MAIN_MODELS;
 
-export const SETTINGS_MODELS: ModelOption[] = [
-    ...MODELS,
-    { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", group: "Anthropic" },
-    {
-        id: "gemini-3.1-flash-lite-preview",
-        label: "Gemini 3.1 Flash Lite",
-        group: "Google",
-    },
-    { id: "gpt-5.4-lite", label: "GPT-5.4 Lite", group: "OpenAI" },
-];
+/** Default settings models (title/tabular pickers). */
+export const SETTINGS_MODELS: ModelOption[] = BUILTIN_SETTINGS_MODELS;
 
 export const DEFAULT_MODEL_ID = "gemini-3-flash-preview";
 
@@ -56,14 +44,37 @@ interface Props {
     value: string;
     onChange: (id: string) => void;
     apiKeys?: ApiKeyState;
+    /** When set, use this list instead of the live catalog (e.g. settings page). */
+    options?: ModelOption[];
 }
 
-export function ModelToggle({ value, onChange, apiKeys }: Props) {
+export function useLiveModels(kind: "main" | "settings" = "main"): ModelOption[] {
+    const [models, setModels] = useState<ModelOption[]>(
+        kind === "settings" ? SETTINGS_MODELS : MODELS,
+    );
+
+    useEffect(() => {
+        let cancelled = false;
+        fetchModelCatalog().then((catalog) => {
+            if (cancelled) return;
+            setModels(kind === "settings" ? catalog.settings : catalog.main);
+        });
+        return () => {
+            cancelled = true;
+        };
+    }, [kind]);
+
+    return models;
+}
+
+export function ModelToggle({ value, onChange, apiKeys, options }: Props) {
+    const live = useLiveModels("main");
+    const models = options ?? live;
     const [isOpen, setIsOpen] = useState(false);
-    const selected = MODELS.find((m) => m.id === value);
-    const selectedLabel = selected?.label ?? "Model";
+    const selected = models.find((m) => m.id === value);
+    const selectedLabel = selected?.label ?? value ?? "Model";
     const selectedAvailable = apiKeys
-        ? isModelAvailable(value, apiKeys)
+        ? isModelAvailable(value, apiKeys, models)
         : true;
 
     return (
@@ -93,7 +104,7 @@ export function ModelToggle({ value, onChange, apiKeys }: Props) {
                 align="end"
             >
                 {GROUP_ORDER.map((group, gi) => {
-                    const items = MODELS.filter((m) => m.group === group);
+                    const items = models.filter((m) => m.group === group);
                     if (items.length === 0) return null;
                     return (
                         <div key={group}>
@@ -101,11 +112,11 @@ export function ModelToggle({ value, onChange, apiKeys }: Props) {
                                 <DropdownMenuSeparator className="-mx-1 my-1 bg-white/70" />
                             )}
                             <DropdownMenuLabel className="text-[10px] uppercase tracking-wider text-gray-400">
-                                {group}
+                                {group === "OpenAI" ? "OpenAI-compatible" : group}
                             </DropdownMenuLabel>
                             {items.map((m) => {
                                 const available = apiKeys
-                                    ? isModelAvailable(m.id, apiKeys)
+                                    ? isModelAvailable(m.id, apiKeys, models)
                                     : true;
                                 return (
                                     <LiquidDropdownItem

@@ -28,7 +28,7 @@ repository.
 - git
 - A Supabase project
 - A Cloudflare R2 bucket, MinIO bucket, or another S3-compatible bucket
-- At least one supported model provider API key: Anthropic, Google Gemini, or OpenAI
+- At least one supported model provider API key: Anthropic, Google Gemini, or an OpenAI-compatible endpoint (OpenAI, Cerebras, Bedrock Mantle, vLLM, etc.)
 - Optional: a CourtListener API token for case law lookup and citation verification
 - LibreOffice installed locally if you need DOC/DOCX to PDF conversion
 
@@ -71,6 +71,15 @@ R2_BUCKET_NAME=mike
 GEMINI_API_KEY=your-gemini-key
 ANTHROPIC_API_KEY=your-anthropic-key
 OPENAI_API_KEY=your-openai-key
+
+# Optional OpenAI-compatible endpoint (default: https://api.openai.com/v1)
+# OPENAI_BASE_URL=https://api.cerebras.ai/v1
+# OPENAI_BASE_URL=https://bedrock-mantle.us-east-2.api.aws/v1
+# OPENAI_API_MODE=auto          # auto | responses | chat
+# OPENAI_MODELS=xai.grok-4.3,zai.glm-5
+# OPENAI_MODEL_LABELS=xai.grok-4.3:Grok 4.3
+# OPENAI_COMPAT_ANY_MODEL=true  # allow any non-claude/gemini model id
+
 RESEND_API_KEY=your-resend-key
 USER_API_KEYS_ENCRYPTION_SECRET=your-long-random-secret
 
@@ -92,6 +101,24 @@ NEXT_PUBLIC_API_BASE_URL=http://localhost:3001
 Supabase values come from the project dashboard. Use the project URL for `SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_URL`, the service role key for the backend `SUPABASE_SECRET_KEY`, and the anon/public key for `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY`. If your Supabase project shows multiple key formats, use the legacy JWT-style anon and service role keys expected by the Supabase client libraries.
 
 Provider keys are only needed for the models, legal research, and email features you plan to use. Model provider keys and the CourtListener token can be configured in `backend/.env` for the whole instance, or per user in **Account > Models & API Keys**. If a provider key is present in `backend/.env`, that provider is available by default and the matching browser API key field is read-only.
+
+### OpenAI-compatible endpoints
+
+Mike can call **any OpenAI-compatible HTTP API** (not only api.openai.com):
+
+| Variable | Purpose |
+|----------|---------|
+| `OPENAI_BASE_URL` | API root ending in `/v1` (Cerebras, Bedrock Mantle, Azure OpenAI proxy, local vLLM, …) |
+| `OPENAI_API_MODE` | `auto` (default), `responses` (OpenAI Responses API), or `chat` (`/v1/chat/completions`) |
+| `OPENAI_API_KEY` | Bearer token for that endpoint (Mantle key, Cerebras key, etc.) |
+| `OPENAI_MODELS` | Comma-separated model ids shown in the main model picker for the OpenAI-compatible group |
+| `OPENAI_MID_MODELS` / `OPENAI_LOW_MODELS` | Optional tabular / title model lists |
+| `OPENAI_MODEL_LABELS` | Optional `id:Label` display names |
+| `OPENAI_COMPAT_ANY_MODEL` | If `true`, any non-claude/non-gemini model id is accepted and routed through this adapter |
+
+`auto` mode uses the **Responses** API for `api.openai.com` and **chat/completions** for every other base URL (what Mantle `/v1` and Cerebras expect).
+
+The live catalog is exposed at `GET /config/models` (no auth) so the frontend can refresh the picker without a rebuild.
 
 ## CourtListener Integration
 
