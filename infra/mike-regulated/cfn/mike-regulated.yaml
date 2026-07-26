@@ -624,65 +624,66 @@ Resources:
         HttpPutResponseHopLimit: 2
         InstanceMetadataTags: enabled
       UserData:
-        Fn::Base64: !Sub
-          - |
-            #!/bin/bash
-            set -euo pipefail
-            dnf update -y
-            dnf install -y docker git jq aws-cli
-            systemctl enable --now docker
-            usermod -aG docker ec2-user || true
+        Fn::Base64:
+          Fn::Sub:
+            - |
+              #!/bin/bash
+              set -euo pipefail
+              dnf update -y
+              dnf install -y docker git jq aws-cli
+              systemctl enable --now docker
+              usermod -aG docker ec2-user || true
 
-            REGION="${AWS::Region}"
-            COST_PROFILE="${CostProfile}"
-            DB_SECRET_ARN="${DbSecret}"
-            DOCS_BUCKET="${DocsBucket}"
-            USER_POOL_ID="${UserPool}"
-            CLIENT_ID="${UserPoolClient}"
-            TS_KEY="${TsKey}"
+              # CFN injects literals below; bash uses $name form only (no ${}) so !Sub ignores them.
+              region="${AWS::Region}"
+              cost_profile="${CostProfile}"
+              db_secret_arn="${DbSecret}"
+              docs_bucket="${DocsBucket}"
+              user_pool_id="${UserPool}"
+              client_id="${UserPoolClient}"
+              ts_key="${TsKey}"
 
-            mkdir -p /opt/mike-regulated
-            cat >/opt/mike-regulated/stack-outputs.env <<EOF
-            AWS_REGION=$${REGION}
-            S3_BUCKET_NAME=$${DOCS_BUCKET}
-            COGNITO_USER_POOL_ID=$${USER_POOL_ID}
-            COGNITO_CLIENT_ID=$${CLIENT_ID}
-            DB_SECRET_ARN=$${DB_SECRET_ARN}
-            REGULATED_MODE=true
-            COST_PROFILE=$${COST_PROFILE}
-            PROJECT=mike-regulated
-            EOF
+              mkdir -p /opt/mike-regulated
+              cat >/opt/mike-regulated/stack-outputs.env <<EOF
+              AWS_REGION=$region
+              S3_BUCKET_NAME=$docs_bucket
+              COGNITO_USER_POOL_ID=$user_pool_id
+              COGNITO_CLIENT_ID=$client_id
+              DB_SECRET_ARN=$db_secret_arn
+              REGULATED_MODE=true
+              COST_PROFILE=$cost_profile
+              PROJECT=mike-regulated
+              EOF
 
-            # MVP: run Postgres on the instance (encrypted EBS) instead of RDS
-            if [ "$${COST_PROFILE}" = "mvp" ]; then
-              for i in $$(seq 1 30); do
-                SECRET_JSON=$$(aws secretsmanager get-secret-value --region "$${REGION}" --secret-id "$${DB_SECRET_ARN}" --query SecretString --output text 2>/dev/null) && break
-                sleep 2
-              done
-              DB_USER=$$(echo "$${SECRET_JSON}" | jq -r .username)
-              DB_PASS=$$(echo "$${SECRET_JSON}" | jq -r .password)
-              DB_NAME=$$(echo "$${SECRET_JSON}" | jq -r .dbname)
-              docker volume create mike-pg-data || true
-              docker rm -f mike-postgres 2>/dev/null || true
-              docker run -d --name mike-postgres --restart unless-stopped \
-                -e POSTGRES_USER="$${DB_USER}" \
-                -e POSTGRES_PASSWORD="$${DB_PASS}" \
-                -e POSTGRES_DB="$${DB_NAME}" \
-                -v mike-pg-data:/var/lib/postgresql/data \
-                -p 127.0.0.1:5432:5432 \
-                postgres:16-alpine
-              MERGED=$$(echo "$${SECRET_JSON}" | jq -c --arg h "127.0.0.1" --argjson p 5432 '. + {host:$$h,port:$$p}')
-              aws secretsmanager put-secret-value --region "$${REGION}" --secret-id "$${DB_SECRET_ARN}" --secret-string "$${MERGED}" || true
-              echo "DATABASE_URL=postgres://$${DB_USER}@127.0.0.1:5432/$${DB_NAME}" >> /opt/mike-regulated/stack-outputs.env
-            fi
+              if [ "$cost_profile" = "mvp" ]; then
+                for i in $(seq 1 30); do
+                  secret_json=$(aws secretsmanager get-secret-value --region "$region" --secret-id "$db_secret_arn" --query SecretString --output text 2>/dev/null) && break
+                  sleep 2
+                done
+                db_user=$(echo "$secret_json" | jq -r .username)
+                db_pass=$(echo "$secret_json" | jq -r .password)
+                db_name=$(echo "$secret_json" | jq -r .dbname)
+                docker volume create mike-pg-data || true
+                docker rm -f mike-postgres 2>/dev/null || true
+                docker run -d --name mike-postgres --restart unless-stopped \
+                  -e POSTGRES_USER="$db_user" \
+                  -e POSTGRES_PASSWORD="$db_pass" \
+                  -e POSTGRES_DB="$db_name" \
+                  -v mike-pg-data:/var/lib/postgresql/data \
+                  -p 127.0.0.1:5432:5432 \
+                  postgres:16-alpine
+                merged=$(echo "$secret_json" | jq -c --arg h "127.0.0.1" --argjson p 5432 '. + {host:$h,port:$p}')
+                aws secretsmanager put-secret-value --region "$region" --secret-id "$db_secret_arn" --secret-string "$merged" || true
+                echo "DATABASE_URL=postgres://$db_user@127.0.0.1:5432/$db_name" >> /opt/mike-regulated/stack-outputs.env
+              fi
 
-            if [ -n "$${TS_KEY}" ]; then
-              curl -fsSL https://tailscale.com/install.sh | sh
-              tailscale up --auth-key="$${TS_KEY}" --hostname=mike-regulated --ssh=false || true
-            fi
+              if [ -n "$ts_key" ]; then
+                curl -fsSL https://tailscale.com/install.sh | sh
+                tailscale up --auth-key="$ts_key" --hostname=mike-regulated --ssh=false || true
+              fi
 
-            echo "mike-regulated bootstrap complete profile=$${COST_PROFILE} $$(date -u)" >> /var/log/mike-regulated-bootstrap.log
-          - TsKey: !Ref TailscaleAuthKey
+              echo "mike-regulated bootstrap complete profile=$cost_profile $(date -u)" >> /var/log/mike-regulated-bootstrap.log
+            - TsKey: !Ref TailscaleAuthKey
       Tags:
         - Key: Name
           Value: mike-regulated
