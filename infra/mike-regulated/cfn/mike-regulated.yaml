@@ -624,83 +624,65 @@ Resources:
         HttpPutResponseHopLimit: 2
         InstanceMetadataTags: enabled
       UserData:
-        Fn::Base64: !Join
-          - ""
-          - - |
-              #!/bin/bash
-              set -euo pipefail
-              dnf update -y
-              dnf install -y docker git jq aws-cli
-              systemctl enable --now docker
-              usermod -aG docker ec2-user || true
-              region="
-            - !Ref AWS::Region
-            - |
-              "
-              cost_profile="
-            - !Ref CostProfile
-            - |
-              "
-              db_secret_arn="
-            - !Ref DbSecret
-            - |
-              "
-              docs_bucket="
-            - !Ref DocsBucket
-            - |
-              "
-              user_pool_id="
-            - !Ref UserPool
-            - |
-              "
-              client_id="
-            - !Ref UserPoolClient
-            - |
-              "
-              ts_key="
-            - !Ref TailscaleAuthKey
-            - |
-              "
-              mkdir -p /opt/mike-regulated
-              {
-                echo "AWS_REGION=$region"
-                echo "S3_BUCKET_NAME=$docs_bucket"
-                echo "COGNITO_USER_POOL_ID=$user_pool_id"
-                echo "COGNITO_CLIENT_ID=$client_id"
-                echo "DB_SECRET_ARN=$db_secret_arn"
-                echo "REGULATED_MODE=true"
-                echo "COST_PROFILE=$cost_profile"
-                echo "PROJECT=mike-regulated"
-              } > /opt/mike-regulated/stack-outputs.env
+        # Use single-quoted CFN interpolations so values stay on one line.
+        # Bash must use $name (not ${name}) to avoid Fn::Sub collisions.
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euo pipefail
+          dnf update -y
+          dnf install -y docker git jq aws-cli
+          systemctl enable --now docker
+          usermod -aG docker ec2-user || true
 
-              if [ "$cost_profile" = "mvp" ]; then
-                for i in $(seq 1 30); do
-                  secret_json=$(aws secretsmanager get-secret-value --region "$region" --secret-id "$db_secret_arn" --query SecretString --output text 2>/dev/null) && break
-                  sleep 2
-                done
-                db_user=$(echo "$secret_json" | jq -r .username)
-                db_pass=$(echo "$secret_json" | jq -r .password)
-                db_name=$(echo "$secret_json" | jq -r .dbname)
-                docker volume create mike-pg-data || true
-                docker rm -f mike-postgres 2>/dev/null || true
-                docker run -d --name mike-postgres --restart unless-stopped \
-                  -e POSTGRES_USER="$db_user" \
-                  -e POSTGRES_PASSWORD="$db_pass" \
-                  -e POSTGRES_DB="$db_name" \
-                  -v mike-pg-data:/var/lib/postgresql/data \
-                  -p 127.0.0.1:5432:5432 \
-                  postgres:16-alpine
-                merged=$(echo "$secret_json" | jq -c --arg host "127.0.0.1" --argjson port 5432 '. + {host:$host,port:$port}')
-                aws secretsmanager put-secret-value --region "$region" --secret-id "$db_secret_arn" --secret-string "$merged" || true
-                echo "DATABASE_URL=postgres://$db_user@127.0.0.1:5432/$db_name" >> /opt/mike-regulated/stack-outputs.env
-              fi
+          region='${AWS::Region}'
+          cost_profile='${CostProfile}'
+          db_secret_arn='${DbSecret}'
+          docs_bucket='${DocsBucket}'
+          user_pool_id='${UserPool}'
+          client_id='${UserPoolClient}'
+          ts_key='${TailscaleAuthKey}'
 
-              if [ -n "$ts_key" ]; then
-                curl -fsSL https://tailscale.com/install.sh | sh
-                tailscale up --auth-key="$ts_key" --hostname=mike-regulated --ssh=false || true
-              fi
+          mkdir -p /opt/mike-regulated
+          cat > /opt/mike-regulated/stack-outputs.env <<EOF
+          AWS_REGION=$region
+          S3_BUCKET_NAME=$docs_bucket
+          COGNITO_USER_POOL_ID=$user_pool_id
+          COGNITO_CLIENT_ID=$client_id
+          DB_SECRET_ARN=$db_secret_arn
+          REGULATED_MODE=true
+          COST_PROFILE=$cost_profile
+          PROJECT=mike-regulated
+          EOF
 
-              echo "mike-regulated bootstrap complete profile=$cost_profile $(date -u)" >> /var/log/mike-regulated-bootstrap.log
+          if [ "$cost_profile" = "mvp" ]; then
+            for i in $(seq 1 30); do
+              secret_json=$(aws secretsmanager get-secret-value --region "$region" --secret-id "$db_secret_arn" --query SecretString --output text 2>/dev/null) && break
+              sleep 2
+            done
+            db_user=$(echo "$secret_json" | jq -r .username)
+            db_pass=$(echo "$secret_json" | jq -r .password)
+            db_name=$(echo "$secret_json" | jq -r .dbname)
+            docker volume create mike-pg-data || true
+            docker rm -f mike-postgres 2>/dev/null || true
+            docker run -d --name mike-postgres --restart unless-stopped \
+              -e POSTGRES_USER="$db_user" \
+              -e POSTGRES_PASSWORD="$db_pass" \
+              -e POSTGRES_DB="$db_name" \
+              -v mike-pg-data:/var/lib/postgresql/data \
+              -p 127.0.0.1:5432:5432 \
+              postgres:16-alpine
+            merged=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); d['host']='127.0.0.1'; d['port']=5432; print(json.dumps(d))" "$secret_json")
+            aws secretsmanager put-secret-value --region "$region" --secret-id "$db_secret_arn" --secret-string "$merged" || true
+            echo "DATABASE_URL=postgres://$db_user@127.0.0.1:5432/$db_name" >> /opt/mike-regulated/stack-outputs.env
+          fi
+
+          if [ -n "$ts_key" ]; then
+            curl -fsSL https://tailscale.com/install.sh | sh
+            tailscale up --auth-key="$ts_key" --hostname=mike-regulated --ssh=false || true
+          fi
+
+          echo "mike-regulated bootstrap complete profile=$cost_profile $(date -u)" >> /var/log/mike-regulated-bootstrap.log
+
 
       Tags:
         - Key: Name
@@ -760,5 +742,5 @@ Outputs:
   EstimatedMonthlyHint:
     Value: !If
       - IsMvp
-      - "~$30-60/mo (t3.medium + EBS + S3/KMS; no NAT, no RDS)"
+      - "~$20-45/mo (t3.small/medium + EBS + S3/KMS; no NAT, no RDS)"
       - "~$120-200+/mo (NAT + RDS + larger host)"
